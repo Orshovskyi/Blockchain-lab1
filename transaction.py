@@ -1,5 +1,5 @@
 """
-Транзакції CNUCoin: формування транзакції, обчислення TAHash, оновлення BlockChainTable, ЕЦП.
+Транзакції CNUCoin: формування транзакції, обчислення TAHash, майнінг, оновлення BlockChainTable, ЕЦП.
 """
 import sqlite3
 from datetime import datetime
@@ -193,3 +193,99 @@ def approve_transaction(
     )
     conn.commit()
     return None
+
+
+def mine_next_block(conn: sqlite3.Connection, miner_cnucoin_id: str) -> tuple[str | None, int | None]:
+    """
+    Майнінг за правилами ЛР2.
+
+    1. Майнер обирає першу за датою/часом непідтверджену транзакцію.
+    2. Хеш-образ цієї транзакції (TAHash) конкатенується з поточним BlockChainHash та Nonce.
+    3. Nonce початково = 0 і збільшується, поки новий BlockChainHash не починатиметься з '0'
+       (Difficulty Target для ЛР2).
+    4. При успіху новий BlockChainHash і Nonce записуються в BlockChainTable та в транзакцію,
+       дані підписуються ЕЦП майнера, транзакція підтверджується (approve_transaction).
+
+    Повертає (помилка або None, кількість ітерацій Nonce або None).
+    """
+    cur = conn.cursor()
+
+    # Перша за датою/часом непідтверджена транзакція
+    cur.execute(
+        """
+        SELECT TAID, TAHash, TADate, "From", "To", TASum, Nonce, TAApproved
+        FROM TransactionsTable
+        WHERE TAApproved = 0
+        ORDER BY TADate, TAID
+        LIMIT 1
+        """
+    )
+    tx = cur.fetchone()
+    if not tx:
+        return "Немає непідтверджених транзакцій для майнінгу.", None
+
+    taid = tx["TAID"]
+    ta_hash = tx["TAHash"]
+    from_addr = tx["From"]
+    to_addr = tx["To"]
+    amount = tx["TASum"]
+
+    # Поточний стан блокчейну
+    current_block_hash, _ = get_current_blockchain_state(conn)
+
+    print("Майнінг транзакції:")
+    print(f"  TAID={taid} | {from_addr} -> {to_addr} | сума={amount} CNUCoin")
+    print(f"  Поточний BlockChainHash: {current_block_hash}")
+
+    nonce = 0
+    iterations = 0
+
+    # Майнінг: підбираємо Nonce так, щоб новий BlockChainHash починався з '0'
+    while True:
+        payload = f"{ta_hash}|{current_block_hash}|{nonce}"
+        new_block_hash = hash_data(payload.encode("utf-8"))
+        iterations += 1
+        if new_block_hash.startswith("0"):
+            break
+        nonce += 1
+
+        # Невеликий проміжний вивід, якщо ітерацій багато
+        if iterations % 100000 == 0:
+            print(f"  Перевірено {iterations} значень Nonce, поточний={nonce}")
+
+    # Підпис майнера над даними блоку
+    private_pem = get_private_key_pem(conn, miner_cnucoin_id)
+    block_signature = sign_data_hex(private_pem, new_block_hash.encode("utf-8"))
+
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Оновлюємо BlockChainTable новим хешем та Nonce
+    cur.execute(
+        """
+        UPDATE BlockChainTable
+        SET MinerID = ?, DateTime = ?, BlockChainHash = ?, Nonce = ?, BlockAssign = ?
+        WHERE id = 1
+        """,
+        (miner_cnucoin_id, now, new_block_hash, nonce, block_signature),
+    )
+
+    # Записуємо Nonce у транзакцію (для звітності майнінгу)
+    cur.execute(
+        "UPDATE TransactionsTable SET Nonce = ? WHERE TAID = ?",
+        (nonce, taid),
+    )
+
+    # Підтверджуємо транзакцію та оновлюємо баланси через гаманець
+    err = approve_transaction(conn, taid, miner_cnucoin_id)
+    if err:
+        conn.rollback()
+        return err, iterations
+
+    conn.commit()
+
+    print("Результат майнінгу:")
+    print(f"  Знайдений Nonce: {nonce}")
+    print(f"  Новий BlockChainHash: {new_block_hash}")
+    print(f"  Кількість ітерацій: {iterations}")
+
+    return None, iterations

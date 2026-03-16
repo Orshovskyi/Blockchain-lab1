@@ -14,6 +14,7 @@ from transaction import (
     list_transactions,
     list_pending_transactions,
     approve_transaction,
+    mine_next_block,
 )
 
 DEFAULT_INITIAL_BALANCE = 100.0
@@ -175,6 +176,21 @@ def do_approve_transaction(conn: sqlite3.Connection) -> None:
         print("Транзакцію підтверджено. Баланси оновлено.")
 
 
+def do_mine(conn: sqlite3.Connection) -> None:
+    """Запускає майнінг наступної непідтвердженої транзакції (ЛР2)."""
+    print("Оберіть майнера для майнінгу:")
+    miner_id = pick_miner(conn, "Номер майнера: ")
+    if miner_id is None:
+        return
+    err, iterations = mine_next_block(conn, miner_id)
+    if err:
+        print(err)
+        return
+    print("Майнінг завершено успішно.")
+    if iterations is not None:
+        print(f"Підібрано Nonce за {iterations} ітерацій.")
+
+
 def do_clear_db(conn: sqlite3.Connection) -> None:
     """Очистити всі записи з усіх таблиць (з підтвердженням)."""
     confirm = input("Видалити всі записи з бази? (y/n): ").strip().lower()
@@ -220,7 +236,8 @@ def main():
         print("  4. Переглянути транзакції")
         print("  5. Деталі транзакції")
         print("  6. Підтвердити транзакцію (майнер)")
-        print("  7. Очистити базу")
+        print("  7. Майнінг наступної транзакції")
+        print("  8. Очистити базу")
         print("  0. Вийти")
         choice = input("Оберіть дію: ").strip()
 
@@ -239,9 +256,11 @@ def main():
         elif choice == "6":
             do_approve_transaction(conn)
         elif choice == "7":
+            do_mine(conn)
+        elif choice == "8":
             do_clear_db(conn)
         else:
-            print("Невірний вибір. Введіть 0–7.")
+            print("Невірний вибір. Введіть 0–8.")
         print()
 
     conn.close()
